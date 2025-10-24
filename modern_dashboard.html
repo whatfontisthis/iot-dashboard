@@ -392,13 +392,17 @@
             min="0.5"
             max="5"
             step="0.5"
-            value="2"
+            value="1"
           />
-          <span id="intervalValue">2.0초</span>
+          <span id="intervalValue">1.0초</span>
         </div>
         <div id="status" class="status paused small">
           <div class="status-indicator paused"></div>
           상태: 대기 중
+        </div>
+        <div id="picoStatus" class="status paused small">
+          <div class="status-indicator paused"></div>
+          피코: 연결 안됨
         </div>
         <div
           style="
@@ -416,7 +420,7 @@
               text-align: center;
             "
           >
-            피코를 연결한 후 우측 버튼을 눌르세요 👉
+            우측 버튼을 눌르세요 👉
           </span>
         </div>
         <button id="startBtn" class="btn btn-primary giant">
@@ -493,7 +497,7 @@
     <script>
       // Global variables
       let isCollecting = false;
-      let interval = 2000;
+      let interval = 1000;
       let dataInterval;
       let currentData = {
         temperature: 25.0,
@@ -571,7 +575,7 @@
               fill: true,
             },
             {
-              label: "위험 온도: 35°C",
+              label: "위험 온도: 30°C",
               data: [],
               borderColor: "#424242",
               backgroundColor: "transparent",
@@ -664,14 +668,9 @@
         },
       });
 
-      // Generate realistic sensor data
+      // Generate data - real from Pico for temp/humidity, simulated for sound/water
       function generateData() {
-        // Temperature: oscillate between 24.8~25.1 randomly
-        currentData.temperature = 24.8 + Math.random() * 0.3;
-
-        // Humidity: oscillate between 60.2~61 randomly
-        currentData.humidity = 60.2 + Math.random() * 0.8;
-
+        // Temperature and Humidity: Get from Pico (will be updated by fetchPicoData)
         // Sound: occasional spikes (10% chance) - keep as is
         if (Math.random() < 0.1) {
           const soundChange = (Math.random() - 0.5) * 30;
@@ -697,6 +696,80 @@
         };
       }
 
+      // Fetch data from Raspberry Pi Pico
+      async function fetchPicoData() {
+        console.log("Attempting to fetch data from Pico...");
+        try {
+          // Try to fetch from Pico (adjust URL/port as needed)
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 2000);
+
+          const response = await fetch("http://192.168.0.14:8080/sensors", {
+            method: "GET",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            signal: controller.signal,
+          });
+
+          clearTimeout(timeoutId);
+
+          console.log("Response status:", response.status);
+          console.log("Response ok:", response.ok);
+
+          if (response.ok) {
+            const picoData = await response.json();
+            console.log("Raw Pico data:", picoData);
+
+            // Update temperature and humidity from Pico
+            if (picoData.temperature !== undefined) {
+              currentData.temperature = parseFloat(picoData.temperature);
+              console.log("Updated temperature:", currentData.temperature);
+            }
+            if (picoData.humidity !== undefined) {
+              currentData.humidity = parseFloat(picoData.humidity);
+              console.log("Updated humidity:", currentData.humidity);
+            }
+            console.log("Pico data received and processed:", picoData);
+
+            // Update Pico connection status
+            updatePicoStatus(true);
+          } else {
+            console.log("Response not ok, status:", response.status);
+            throw new Error(`HTTP ${response.status}`);
+          }
+        } catch (error) {
+          // If Pico is not connected, use simulated data
+          console.log(
+            "Pico not connected, using simulated data:",
+            error.message
+          );
+          console.log("Full error:", error);
+
+          // Temperature: oscillate between 24.8~25.1 randomly
+          currentData.temperature = 24.8 + Math.random() * 0.3;
+          // Humidity: oscillate between 60.2~61 randomly
+          currentData.humidity = 60.2 + Math.random() * 0.8;
+
+          // Update Pico connection status
+          updatePicoStatus(false);
+        }
+      }
+
+      // Update Pico connection status display
+      function updatePicoStatus(connected) {
+        const picoStatus = document.getElementById("picoStatus");
+        if (connected) {
+          picoStatus.innerHTML =
+            '<div class="status-indicator active"></div>피코: 연결됨';
+          picoStatus.className = "status active small";
+        } else {
+          picoStatus.innerHTML =
+            '<div class="status-indicator paused"></div>피코: 연결 안됨';
+          picoStatus.className = "status paused small";
+        }
+      }
+
       // Update metrics display
       function updateMetrics(data) {
         document.getElementById("tempValue").textContent = data.temperature;
@@ -712,7 +785,7 @@
       function updateStatusIndicators(data) {
         // Temperature status
         const tempStatus = document.getElementById("tempStatus");
-        if (data.temperature > 35) {
+        if (data.temperature > 30) {
           tempStatus.textContent = "위험";
           tempStatus.className = "metric-status danger";
         } else {
@@ -748,7 +821,7 @@
         // Update temperature chart
         tempChart.data.labels.push(now);
         tempChart.data.datasets[0].data.push(data.temperature);
-        tempChart.data.datasets[1].data.push(35); // Danger line at 35°C
+        tempChart.data.datasets[1].data.push(30); // Danger line at 30°C
         if (tempChart.data.labels.length > 20) {
           tempChart.data.labels.shift();
           tempChart.data.datasets[0].data.shift();
@@ -799,7 +872,10 @@
           console.log("Data collection stopped");
         } else {
           console.log("Starting data collection with interval:", interval);
-          dataInterval = setInterval(() => {
+          dataInterval = setInterval(async () => {
+            // Fetch real data from Pico first
+            await fetchPicoData();
+            // Then generate complete dataset
             const newData = generateData();
             console.log("Generated data:", newData);
             updateMetrics(newData);
@@ -814,9 +890,35 @@
         }
       }
 
+      // Test Pico connection on page load
+      async function testPicoConnection() {
+        console.log("Testing Pico connection on page load...");
+        try {
+          const response = await fetch("http://192.168.0.14:8080/sensors");
+          if (response.ok) {
+            const data = await response.json();
+            console.log("✅ Pico connection test successful:", data);
+            updatePicoStatus(true);
+          } else {
+            console.log(
+              "❌ Pico connection test failed - response not ok:",
+              response.status
+            );
+            updatePicoStatus(false);
+          }
+        } catch (error) {
+          console.log("❌ Pico connection test failed:", error.message);
+          updatePicoStatus(false);
+        }
+      }
+
       // Event listeners
       document.addEventListener("DOMContentLoaded", function () {
         console.log("DOM loaded, attaching event listeners");
+
+        // Test Pico connection immediately
+        testPicoConnection();
+
         const startBtn = document.getElementById("startBtn");
         if (startBtn) {
           console.log("Start button found, adding event listener");
@@ -836,7 +938,10 @@
             // Restart collection with new interval if currently collecting
             if (isCollecting) {
               clearInterval(dataInterval);
-              dataInterval = setInterval(() => {
+              dataInterval = setInterval(async () => {
+                // Fetch real data from Pico first
+                await fetchPicoData();
+                // Then generate complete dataset
                 const newData = generateData();
                 updateMetrics(newData);
                 updateCharts(newData);
